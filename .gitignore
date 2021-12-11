@@ -1,0 +1,7 @@
+/target
+/.idea/*
+*.log
+
+/conf
+/db
+/engine
