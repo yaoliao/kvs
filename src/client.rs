@@ -1,66 +1,81 @@
-use std::io::{BufReader, BufWriter, Write};
-use std::net::{TcpStream, ToSocketAddrs};
-
+use futures_util::{SinkExt, TryStreamExt};
 use log::{debug, error, info, warn};
-use serde::Deserialize;
-use serde_json::de::{Deserializer, IoRead};
+use tokio::net::{TcpStream, ToSocketAddrs};
+use tokio_serde::formats::*;
+use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-use crate::error::{Result, KvsError};
-
-use crate::common::{GetResponse, RemoveResponse, Request, SetResponse};
+use crate::common::{Request, Response};
+use crate::KvsError;
+use crate::Result;
 
 pub struct KvsClient {
-    writer: BufWriter<TcpStream>,
-    reader: Deserializer<IoRead<BufReader<TcpStream>>>,
+    stream: tokio_serde::Framed<
+        Framed<TcpStream, LengthDelimitedCodec>,
+        Response,
+        Request,
+        Json<Response, Request>,
+    >,
 }
 
 impl KvsClient {
-    pub fn connect<A: ToSocketAddrs>(addr: A) -> Result<Self> {
-        let stream = TcpStream::connect(addr)?;
-        debug!("connection to server success");
+    pub async fn connect<A: ToSocketAddrs>(addr: A) -> Result<Self> {
+        let socket = TcpStream::connect(&addr).await?;
 
-        Ok(KvsClient {
-            writer: BufWriter::new(stream.try_clone()?),
-            reader: Deserializer::new(IoRead::new(BufReader::new(stream))),
-        })
+        let length_delimited = Framed::new(socket, LengthDelimitedCodec::new());
+        let stream =
+            tokio_serde::Framed::new(length_delimited, Json::<Response, Request>::default());
+
+        Ok(KvsClient { stream })
     }
 
-    pub fn get(&mut self, key: String) -> Result<Option<String>> {
+    pub async fn get(&mut self, key: String) -> Result<Option<String>> {
         debug!("client get key:{}", key);
 
-        serde_json::to_writer(&mut self.writer, &Request::Get { key })?;
-        self.writer.flush()?;
+        self.stream.send(Request::Get { key }).await?;
+        self.stream.flush().await?;
 
-        let resp = GetResponse::deserialize(&mut self.reader)?;
-        match resp {
-            GetResponse::Ok(value) => Ok(value),
-            GetResponse::Err(msg) => Err(KvsError::StringError(msg))
+        if let Some(msg) = self.stream.try_next().await.unwrap() {
+            match msg {
+                Response::Get(value) => Ok(value),
+                Response::Err(e) => Err(KvsError::StringError(e)),
+                _ => Err(KvsError::StringError("Invalid response".to_owned())),
+            }
+        } else {
+            Err(KvsError::StringError("Invalid response".to_owned()))
         }
     }
 
-    pub fn set(&mut self, key: String, value: String) -> Result<()> {
+    pub async fn set(&mut self, key: String, value: String) -> Result<()> {
         debug!("client set key:{} value:{}", key, value);
 
-        serde_json::to_writer(&mut self.writer, &Request::Set { key, value })?;
-        self.writer.flush()?;
+        self.stream.send(Request::Set { key, value }).await?;
+        self.stream.flush().await?;
 
-        let resp = SetResponse::deserialize(&mut self.reader)?;
-        match resp {
-            SetResponse::Ok(()) => Ok(()),
-            SetResponse::Err(msg) => Err(KvsError::StringError(msg))
+        if let Some(msg) = self.stream.try_next().await.unwrap() {
+            match msg {
+                Response::Set => Ok(()),
+                Response::Err(e) => Err(KvsError::StringError(e)),
+                _ => Err(KvsError::StringError("Invalid response".to_owned())),
+            }
+        } else {
+            Err(KvsError::StringError("Invalid response".to_owned()))
         }
     }
 
-    pub fn remove(&mut self, key: String) -> Result<()> {
+    pub async fn remove(&mut self, key: String) -> Result<()> {
         debug!("client remove key:{}", key);
 
-        serde_json::to_writer(&mut self.writer, &Request::Remove { key })?;
-        self.writer.flush()?;
+        self.stream.send(Request::Remove { key }).await?;
+        self.stream.flush().await?;
 
-        let resp = RemoveResponse::deserialize(&mut self.reader)?;
-        match resp {
-            RemoveResponse::Ok(()) => Ok(()),
-            RemoveResponse::Err(msg) => Err(KvsError::StringError(msg))
+        if let Some(msg) = self.stream.try_next().await.unwrap() {
+            match msg {
+                Response::Remove => Ok(()),
+                Response::Err(e) => Err(KvsError::StringError(e)),
+                _ => Err(KvsError::StringError("Invalid response".to_owned())),
+            }
+        } else {
+            Err(KvsError::StringError("Invalid response".to_owned()))
         }
     }
 }

@@ -168,7 +168,6 @@ impl Clone for KvStoreReader {
     }
 }
 
-
 impl KvStoreWriter {
     fn set(&mut self, key: String, value: String) -> Result<()> {
         let command = Command::set(key.clone(), value);

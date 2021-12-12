@@ -9,7 +9,7 @@ impl KvsLog {
 
         // 设置日志
         let env = env_logger::Env::default()
-            .filter_or(env_logger::DEFAULT_FILTER_ENV, LevelFilter::Info.as_str());
+            .filter_or(env_logger::DEFAULT_FILTER_ENV, LevelFilter::Debug.as_str());
         env_logger::Builder::from_env(env)
             .format(|buf, record| {
                 writeln!(

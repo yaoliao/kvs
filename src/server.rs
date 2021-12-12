@@ -1,10 +1,7 @@
-use std::io::{BufReader, BufWriter, Write};
-use std::net::{TcpListener, TcpStream, ToSocketAddrs};
-
 use log::{debug, error};
-use serde_json::Deserializer;
+use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
 
-use crate::common::{GetResponse, RemoveResponse, Request, SetResponse};
+use crate::common::{Request, Response};
 use crate::engines::KvsEngine;
 use crate::error::Result;
 use crate::thread_pool::ThreadPool;
@@ -19,59 +16,61 @@ impl<E: KvsEngine, P: ThreadPool> KvsServer<E, P> {
         KvsServer { engine, pool }
     }
 
-    pub fn run<A: ToSocketAddrs>(&mut self, addr: A) -> Result<()> {
-        let listener = TcpListener::bind(addr)?;
+    pub async fn run<A: ToSocketAddrs>(&mut self, addr: A) -> Result<()> {
+        let listener = TcpListener::bind(addr).await?;
         debug!("server bind success");
 
-        for stream in listener.incoming() {
+        loop {
+            let (stream, addr) = listener.accept().await.unwrap();
+            debug!("client {} connection ......", addr);
+
             let engine_clone = self.engine.clone();
-            self.pool.spawn(move || match stream {
-                Ok(stream) => {
-                    if let Err(e) = serve(stream, engine_clone) {
-                        error!("Error on serving client: {}", e);
-                    }
+            tokio::spawn(async move {
+                if let Err(e) = serve(stream, engine_clone).await {
+                    error!("Error on serving client: {}", e);
                 }
-                Err(e) => error!("Connection failed: {}", e),
             });
         }
-        Ok(())
     }
 }
 
-fn serve<E: KvsEngine>(tcp: TcpStream, engine: E) -> Result<()> {
-    let peer_addr = tcp.peer_addr()?;
-    let reader = BufReader::new(&tcp);
-    let mut writer = BufWriter::new(&tcp);
+async fn serve<E: KvsEngine>(tcp: TcpStream, engine: E) -> Result<()> {
+    use futures_util::{SinkExt, TryStreamExt};
+    use tokio_serde::formats::*;
+    use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-    let req = Deserializer::from_reader(reader).into_iter::<Request>();
-
-    for result in req {
-        let result = result?;
-        debug!("Receive request from {}: {:?}", peer_addr, result);
+    let length_delimited = Framed::new(tcp, LengthDelimitedCodec::new());
+    let mut stream: tokio_serde::Framed<
+        Framed<TcpStream, LengthDelimitedCodec>,
+        Request,
+        Response,
+        Json<Request, Response>,
+    > = tokio_serde::Framed::new(length_delimited, Json::<Request, Response>::default());
+    if let Some(result) = stream.try_next().await? {
         match result {
             Request::Get { key } => {
                 let resp = match engine.get(key) {
-                    Result::Ok(v) => GetResponse::Ok(v),
-                    Result::Err(e) => GetResponse::Err(format!("{}", e)),
+                    Result::Ok(v) => Response::Get(v),
+                    Result::Err(e) => Response::Err(format!("{}", e)),
                 };
-                serde_json::to_writer(&mut writer, &resp)?;
-                writer.flush()?;
+                stream.send(resp).await?;
+                stream.flush().await?
             }
             Request::Set { key, value } => {
                 let resp = match engine.set(key, value) {
-                    Result::Ok(()) => SetResponse::Ok(()),
-                    Result::Err(e) => SetResponse::Err(format!("{}", e)),
+                    Result::Ok(()) => Response::Set,
+                    Result::Err(e) => Response::Err(format!("{}", e)),
                 };
-                serde_json::to_writer(&mut writer, &resp)?;
-                writer.flush()?;
+                stream.send(resp).await?;
+                stream.flush().await?
             }
             Request::Remove { key } => {
                 let resp = match engine.remove(key) {
-                    Result::Ok(v) => RemoveResponse::Ok(v),
-                    Result::Err(e) => RemoveResponse::Err(format!("{}", e)),
+                    Result::Ok(()) => Response::Remove,
+                    Result::Err(e) => Response::Err(format!("{}", e)),
                 };
-                serde_json::to_writer(&mut writer, &resp)?;
-                writer.flush()?;
+                stream.send(resp).await?;
+                stream.flush().await?
             }
         }
     }

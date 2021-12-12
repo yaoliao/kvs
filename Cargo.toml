@@ -22,7 +22,11 @@ num_cpus = "1.10.0"
 rayon = "1.0.3"
 crossbeam = "0.7.1"
 tokio = { version = "1.14.0", features = ["full"] }
-tokio-serde-json = "0.3.0"
+tokio-serde = { version = "0.8", features = ["bincode", "cbor", "json", "messagepack"] }
+bytes = "1"
+tokio-util = { version = "0.6.9", features = ["full"] }
+tokio-stream = { version = "0.1.8" }
+futures-util = { version = "0.3.18", features = ["sink"] }
 
 [dev-dependencies]
 assert_cmd = "0.11"
